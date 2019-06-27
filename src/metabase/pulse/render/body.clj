@@ -1,6 +1,7 @@
 (ns metabase.pulse.render.body
   (:require [hiccup.core :refer [h]]
             [metabase.mbql.util :as mbql.u]
+            [environ.core :as environ]
             [metabase.pulse.render
              [color :as color]
              [common :as common]
@@ -14,11 +15,11 @@
 
 (def rows-limit
   "Maximum number of rows to render in a Pulse image."
-  20)
+  (Integer/parseInt (or (:mb-pulse-max-rows environ/env) "20")))
 
 (def cols-limit
   "Maximum number of columns to render in a Pulse image."
-  10)
+  (Integer/parseInt (or (:mb-pulse-max-columns environ/env) "10")))
 
 ;; NOTE: hiccup does not escape content by default so be sure to use "h" to escape any user-controlled content :-/
 

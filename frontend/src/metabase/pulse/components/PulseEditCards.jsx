@@ -14,15 +14,15 @@ import colors from "metabase/lib/colors";
 
 const SOFT_LIMIT = 10;
 const HARD_LIMIT = 25;
-const TABLE_MAX_ROWS = 20;
-const TABLE_MAX_COLS = 10;
+const TABLE_MAX_ROWS = (process.env.MB_PULSE_MAX_ROWS || 20);
+const TABLE_MAX_COLS = (process.env.MB_PULSE_MAX_COLUMNS || 10);
 
 function isAutoAttached(cardPreview) {
   return (
     cardPreview &&
     cardPreview.pulse_card_type === "table" &&
     (cardPreview.row_count > TABLE_MAX_ROWS ||
-      cardPreview.col_cound > TABLE_MAX_COLS)
+      cardPreview.col_count > TABLE_MAX_COLS)
   );
 }
 
@@ -102,7 +102,7 @@ export default class PulseEditCards extends Component {
         notices.push({
           type: "warning",
           head: t`Heads up`,
-          body: t`We'll show the first 10 columns and 20 rows of this table in your Pulse. If you email this, we'll add a file attachment with all columns and up to 2,000 rows.`,
+          body: t`We'll show the truncated view of this table in your Pulse. If you email this, we'll add a file attachment with all columns and up to 2,000 rows.`,
         });
       }
       if (cardPreview.pulse_card_type == null && !hasAttachment) {
