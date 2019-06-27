@@ -14,8 +14,8 @@ import colors from "metabase/lib/colors";
 
 const SOFT_LIMIT = 10;
 const HARD_LIMIT = 25;
-const TABLE_MAX_ROWS = (process.env.MB_PULSE_MAX_ROWS || 20);
-const TABLE_MAX_COLS = (process.env.MB_PULSE_MAX_COLUMNS || 10);
+const TABLE_MAX_ROWS = 20;
+const TABLE_MAX_COLS = 10;
 
 function isAutoAttached(cardPreview) {
   return (
