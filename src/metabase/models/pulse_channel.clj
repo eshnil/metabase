@@ -48,7 +48,7 @@
 
 (def ^:private schedule-types
   "Set of the possible schedule-types allowed for a PulseChannel."
-  #{:hourly :daily :weekly :monthly})
+  #{:hourly :daily :weekly :monthly :customcron})
 
 (defn schedule-type?
   "Is `schedule-type` a valid PulseChannel schedule type?"
@@ -61,6 +61,7 @@
   (or
     ;; hourly schedule does not care about other inputs
     (= schedule-type :hourly)
+    (= schedule-type :customcron)
     ;; daily schedule requires a valid `hour`
     (and (= schedule-type :daily)
          (hour-of-day? schedule-hour))
@@ -86,11 +87,11 @@
            :name              "Email"
            :allows_recipients true
            :recipients        ["user", "email"]
-           :schedules         [:hourly :daily :weekly :monthly]}
+           :schedules         [:hourly :daily :weekly :monthly :customcron]}
    :slack {:type              "slack"
            :name              "Slack"
            :allows_recipients false
-           :schedules         [:hourly :daily :weekly :monthly]
+           :schedules         [:hourly :daily :weekly :monthly :customcron]
            :fields            [{:name        "channel"
                                 :type        "select"
                                 :displayName "Post to"
@@ -191,6 +192,18 @@
                                     [:= :schedule_day monthly-schedule-day-or-nil]]]]]})))
 
 
+(defn retrieve-customcron-channels
+  [now]
+  (let [channels     (db/select [PulseChannel :id :pulse_id :schedule_type :channel_type :schedule_frame]
+                      {:where [:and [:= :enabled true]
+                                    [:= :schedule_type "customcron"]]})]
+
+    (filter (fn [x] 
+                (.isSatisfiedBy (new org.quartz.CronExpression (name (:schedule_frame x))) (.toDate now)))
+            channels)
+))
+
+
 (defn update-recipients!
   "Update the `PulseChannelRecipients` for `pulse-CHANNEL`.
   `user-ids` should be a definitive collection of *all* IDs of users who should receive the pulse.
@@ -237,7 +250,7 @@
                         schedule_hour)
       :schedule_day   (when (contains? #{:weekly :monthly} schedule_type)
                         schedule_day)
-      :schedule_frame (when (= schedule_type :monthly)
+      :schedule_frame (when (or (= schedule_type :monthly) (= schedule_type :customcron))
                         schedule_frame))
     (when (supports-recipients? channel_type)
       (update-recipients! id (or (get recipients-by-type true) [])))))
@@ -266,7 +279,7 @@
                                          schedule_hour)
                        :schedule_day   (when (contains? #{:weekly :monthly} schedule_type)
                                          schedule_day)
-                       :schedule_frame (when (= schedule_type :monthly)
+                       :schedule_frame (when (or (= schedule_type :monthly) (= schedule_type :customcron))
                                          schedule_frame))]
     (when (and (supports-recipients? channel_type) (seq (get recipients-by-type true)))
       (update-recipients! id (get recipients-by-type true)))

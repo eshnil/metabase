@@ -6,8 +6,10 @@ import Select from "metabase/components/Select.jsx";
 
 import Settings from "metabase/lib/settings";
 import { capitalize } from "metabase/lib/formatting";
+import { validateCronExpression } from "metabase/lib/pulse";
 import { t } from "ttag";
 import _ from "underscore";
+import cx from "classnames";
 
 export const HOUR_OPTIONS = _.times(12, n => ({
   name: (n === 0 ? 12 : n) + ":00",
@@ -78,6 +80,16 @@ export default class SchedulePicker extends Component {
         newSchedule = {
           ...newSchedule,
           schedule_hour: newSchedule.schedule_hour || 0,
+        };
+      }
+
+      // clear out other values than schedule_type and schedule_frame for cron schedule
+      if (value === "customcron") {
+        newSchedule = {
+          ...newSchedule,
+          schedule_day: null,
+          schedule_hour: null,
+          schedule_frame: (['first','last','mid'].includes(newSchedule.schedule_frame) ? null : newSchedule.schedule_frame)
         };
       }
 
@@ -178,6 +190,25 @@ export default class SchedulePicker extends Component {
     );
   }
 
+  renderCronPicker() {
+    const { schedule } = this.props;
+
+    return (
+      <span className="mt1">
+        <span className="h4 text-bold mx1">on</span>
+        <input
+          value={schedule.schedule_frame || ""}
+          className={cx("input text-bold", {
+              "border-error": !validateCronExpression(schedule.schedule_frame),
+          })}
+          onChange={e => this.onPropertyChange("schedule_frame", e.target.value)}
+          placeholder={t`* * * * * ?`}
+          required
+        />
+      </span>
+    );
+  }
+
   renderHourPicker() {
     const { schedule, textBeforeSendTime } = this.props;
 
@@ -232,6 +263,7 @@ export default class SchedulePicker extends Component {
           optionValueFn={o => o}
           onChange={o => this.onPropertyChange("schedule_type", o)}
         />
+        {scheduleType === "customcron" && this.renderCronPicker()}
         {scheduleType === "monthly" && this.renderMonthlyPicker()}
         {scheduleType === "weekly" && this.renderDayPicker()}
         {(scheduleType === "daily" ||

@@ -3,6 +3,11 @@ export function channelIsValid(channel, channelSpec) {
     return false;
   }
   switch (channel.schedule_type) {
+    case "customcron":
+      if(!validateCronExpression(channel.schedule_frame)) {
+        return false;
+      }
+      break;
     case "monthly":
       if (channel.schedule_frame != null && channel.schedule_hour != null) {
         return true;
@@ -98,3 +103,23 @@ export function createChannel(channelSpec) {
     schedule_frame: "first",
   };
 }
+
+export function validateCronExpression(str) {
+  if(!str) return false;
+  var parts = str.match(/\S+/g);
+  if(!parts) return false;
+  var sec_valid = (parts[0] === "*"); // second-level granularity is unavailable
+  var min_valid = parts[1] && (parts[1].match(/^\S+$/) != null); //non-whitespace
+  var hour_valid = parts[2] && (parts[2].match(/^\S+$/) != null);
+  var dom_valid = parts[3] && (parts[3].match(/^\S+$/) != null);
+  var month_valid = parts[4] && (parts[4].match(/^\S+$/) != null);
+  var dow_valid = parts[5] && (parts[5].match(/^\S+$/) != null);
+
+  if(sec_valid && min_valid && hour_valid && dom_valid && month_valid && dow_valid){
+    if( (parts[3] === "?") || (parts[5] === "?"))
+      return true;
+    else
+      return false;
+  } else return false;
+}
+
