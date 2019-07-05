@@ -47,7 +47,7 @@
    [amalloy/ring-buffer "1.2.2"
     :exclusions [org.clojure/clojure
                  org.clojure/clojurescript]]                          ; fixed length queue implementation, used in log buffering
-   [amalloy/ring-gzip-middleware "0.1.3"]                             ; Ring middleware to GZIP responses if client can handle it
+   [amalloy/ring-gzip-middleware "0.1.4"]                             ; Ring middleware to GZIP responses if client can handle it
    [aleph "0.4.6" :exclusions [org.clojure/tools.logging]]            ; Async HTTP library; WebSockets
    [bigml/histogram "4.1.3"]                                          ; Histogram data structure
    [buddy/buddy-core "1.5.0"                                          ; various cryptograhpic functions
@@ -99,7 +99,7 @@
                  com.sun.jdmk/jmxtools
                  com.sun.jmx/jmxri]]
    [medley "1.2.0"]                                                   ; lightweight lib of useful functions
-   [metabase/mbql "1.0.3"]                                            ; MBQL language schema & util fns
+   [metabase/mbql "1.2.0"]                                            ; MBQL language schema & util fns
    [metabase/throttle "1.0.1"]                                        ; Tools for throttling access to API endpoints and other code pathways
    [javax.xml.bind/jaxb-api "2.4.0-b180830.0359"]                     ; add the `javax.xml.bind` classes which we're still using but were removed in Java 11
    [net.sf.cssbox/cssbox "4.12" :exclusions [org.slf4j/slf4j-api]]    ; HTML / CSS rendering
