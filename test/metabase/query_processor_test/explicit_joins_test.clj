@@ -374,9 +374,9 @@
   (tt/with-temp Card [{card-id               :id
                        {source-query :query} :dataset_query
                        source-metadata       :result_metadata} (qp.test-util/card-with-source-metadata-for-query
-                       (data/mbql-query checkins
-                         {:aggregation [[:count]]
-                          :breakout    [!month.date]}))]
+                                                                (data/mbql-query checkins
+                                                                  {:aggregation [[:count]]
+                                                                   :breakout    [!month.date]}))]
     (qp.test/rows+column-names
       (qp.test/format-rows-by [identity int identity int]
         (data/run-mbql-query checkins
@@ -406,15 +406,34 @@
 ;;
 ;; (Multiple columns named `id` in the example below)
 (datasets/expect-with-drivers (qp.test/non-timeseries-drivers-with-feature :left-join)
-  {:rows
+  {:columns (mapv
+             data/format-name
+             ["id"     "date"   "user_id"     "venue_id"                       ; checkins
+              "id_2"   "name"   "last_login"                                   ; users
+              "id_2_2" "name_2" "category_id" "latitude" "longitude" "price"]) ; venues
+   :rows
    ;; again, not sure why Oracle is the only driver giving us wrong answers here
    (let [tz (if (= driver/*driver* :oracle) "07:00:00.000Z"  "00:00:00.000Z")]
-     [[1 (str "2014-04-07T" tz) 5 12 5 "Brite Spot Family Restaurant" 20 34.078 -118.261 2]
-      [2 (str "2014-09-18T" tz) 1 31 1 "Red Medicine"                  4 10.065 -165.374 3]])
-   :columns (mapv data/format-name
-                  ["id" "date" "user_id" "venue_id" "id_2" "name" "category_id" "latitude" "longitude" "price"])}
+     [[1 (str "2014-04-07T" tz) 5 12
+       5 "Quentin Sören" "2014-10-03T17:30:00.000Z"
+       5 "Brite Spot Family Restaurant" 20 34.078 -118.261 2]
+      [2 (str "2014-09-18T" tz) 1 31
+       1 "Plato Yeshua" "2014-04-01T08:30:00.000Z"
+       1 "Red Medicine" 4 10.065 -165.374 3]])}
   (qp.test/rows+column-names
-    (qp.test/format-rows-by [int str int int int str int 3.0 3.0 int]
+    (qp.test/format-rows-by [int    ; checkins.id
+                             str    ; checkins.date
+                             int    ; checkins.user_id
+                             int    ; checkins.venue_id
+                             int    ; users.id
+                             str    ; users.name
+                             str    ; users.last_login
+                             int    ; venues.id
+                             str    ; venues.name
+                             int    ; venues.category_id
+                             3.0    ; venues.latitude
+                             3.0    ; venues.longitude
+                             int]   ; venues.price
       (data/run-mbql-query checkins
         {:source-query {:source-table $$checkins
                         :joins
@@ -429,14 +448,19 @@
          :order-by     [[:asc $id]]
          :limit        2}))))
 
-
-
-;; TODO Can we join against a source nested native query?
-
-;; TODO Do joins inside nested queries work?
-
-;; TODO Do multiple joins work, and return columns in the correct order?
-
-;; TODO Can we join the same table twice with different conditions?
-
-;; TODO Can we join the same table twice with the same condition?
+;; we should be able to use a SQL question as a source query in a Join
+(datasets/expect-with-drivers (qp.test/non-timeseries-drivers-with-feature :nested-queries :left-join)
+  ;; again, Oracle is wack, not sure why :/
+  (let [tz (if (= driver/*driver* :oracle) "07:00:00.000Z"  "00:00:00.000Z")]
+    [[1 (str "2014-04-07T" tz) 5 12 12 "The Misfit Restaurant + Bar" 2 34.0154 -118.497 2]
+     [2 (str "2014-09-18T" tz) 1 31 31 "Bludso's BBQ"                5 33.8894 -118.207 2]])
+  (tt/with-temp Card [{card-id :id, :as card} (qp.test-util/card-with-source-metadata-for-query
+                                               (data/native-query (qp/query->native (data/mbql-query venues))))]
+    (qp.test/formatted-rows [int identity int int int identity int 4.0 4.0 int]
+      (data/run-mbql-query checkins
+        {:joins    [{:fields       :all
+                     :source-table (str "card__" card-id)
+                     :alias        "card"
+                     :condition    [:= $venue_id &card.*venues.id]}]
+         :order-by [[:asc $id]]
+         :limit    2}))))

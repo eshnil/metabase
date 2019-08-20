@@ -13,7 +13,7 @@
             [metabase.models.humanization :as humanization]
             [metabase.query-processor.store :as qp.store]
             [metabase.util
-             [i18n :refer [tru]]
+             [i18n :refer [deferred-tru tru]]
              [schema :as su]]
             [schema.core :as s]))
 
@@ -53,9 +53,9 @@
     (let [expected-count (count columns)
           actual-count   (count (first rows))]
       (when-not (= expected-count actual-count)
-        (throw (ex-info (str (tru "Query processor error: number of columns returned by driver does not match results.")
+        (throw (ex-info (str (deferred-tru "Query processor error: number of columns returned by driver does not match results.")
                              "\n"
-                             (tru "Expected {0} columns, but first row of resuls has {1} columns."
+                             (deferred-tru "Expected {0} columns, but first row of resuls has {1} columns."
                                   expected-count actual-count))
                  {:expected-columns columns
                   :first-row        (first rows)}))))))
@@ -73,7 +73,7 @@
                              :type/*)]]
      (merge
       {:name         (name col)
-       :display_name (u/keyword->qualified-name col)
+       :display_name (u/qualified-name col)
        :base_type    base-type
        :source       :native}
       ;; It is perfectly legal for a driver to return a column with a blank name; for example, SQL Server does this
@@ -98,13 +98,17 @@
 
 ;;; --------------------------------------------------- Field Info ---------------------------------------------------
 
-(s/defn ^:private display-name-for-joined-field
-  "Return an appropriate display name for a joined field that includes the table it came from if applicable."
-  [field-display-name {:keys [source-table], join-alias :alias}]
-  (let [join-display-name (if (integer? source-table)
-                            (some (qp.store/table source-table) [:display_name :name])
-                            join-alias)]
-    (format "%s → %s" join-display-name field-display-name)))
+(defn- display-name-for-joined-field
+  "Return an appropriate display name for a joined field. For *explicitly* joined Fields, the qualifier is the join
+  alias; for implicitly joined fields, it is the display name of the foreign key used to create the join."
+  [field-display-name {:keys [fk-field-id], join-alias :alias}]
+  (let [qualifier (if fk-field-id
+                    ;; strip off trailing ` id` from FK display name
+                    (str/replace (:display_name (qp.store/field fk-field-id))
+                                 #"(?i)\sid$"
+                                 "")
+                    join-alias)]
+    (format "%s → %s" qualifier field-display-name)))
 
 (defn- infer-expression-type
   [expression]
@@ -114,62 +118,81 @@
     {:base_type    :type/Float
      :special_type :type/Number}))
 
-(s/defn ^:private col-info-for-field-clause :- su/Map
+(s/defn ^:private col-info-for-field-clause :- {:field_ref mbql.s/Field, s/Keyword s/Any}
   [{:keys [source-metadata expressions], :as inner-query} :- su/Map, clause :- mbql.s/Field]
   ;; for various things that can wrap Field clauses recurse on the wrapped Field but include a little bit of info
   ;; about the clause doing the wrapping
   (mbql.u/match-one clause
     [:binning-strategy field strategy _ resolved-options]
-    (assoc (col-info-for-field-clause inner-query field)
-      :binning_info (assoc (u/snake-keys resolved-options)
-                      :binning_strategy strategy))
+    (let [recursive-info (col-info-for-field-clause inner-query field)]
+      (assoc recursive-info
+        :binning_info (assoc (u/snake-keys resolved-options)
+                        :binning_strategy strategy)
+        :field_ref    (assoc (vec &match) 1 (:field_ref recursive-info))))
 
     [:datetime-field field unit]
-    (assoc (col-info-for-field-clause inner-query field) :unit unit)
+    (let [recursive-info (col-info-for-field-clause inner-query field)]
+      (assoc recursive-info
+        :unit      unit
+        :field_ref (assoc (vec &match) 1 (:field_ref recursive-info))))
 
-    [:joined-field alias field]
-    (let [{:keys [fk-field-id], :as join} (join-with-alias inner-query alias)]
-      (-> (col-info-for-field-clause inner-query field)
-          (assoc :fk_field_id fk-field-id)
-          (update :display_name display-name-for-joined-field join)))
+    [:joined-field join-alias field]
+    (let [{:keys [fk-field-id], :as join} (join-with-alias inner-query join-alias)]
+      (let [recursive-info (col-info-for-field-clause inner-query field)]
+        (-> recursive-info
+            (merge (when fk-field-id {:fk_field_id fk-field-id}))
+            (assoc :field_ref (if fk-field-id
+                                [:fk-> [:field-id fk-field-id] field]
+                                (assoc (vec &match) 2 (:field_ref recursive-info))))
+            (update :display_name display-name-for-joined-field join))))
 
     ;; TODO - should be able to remove this now
     [:fk-> [:field-id source-field-id] field]
-    (assoc (col-info-for-field-clause inner-query field) :fk_field_id source-field-id)
+    (assoc (col-info-for-field-clause inner-query field)
+      :field_ref  &match
+      :fk_field_id source-field-id)
 
     ;; TODO - should be able to remove this now
     ;; for FKs where source is a :field-literal don't include `:fk_field_id`
     [:fk-> _ field]
-    (recur field)
+    (assoc (col-info-for-field-clause inner-query field)
+      :field_ref &match)
 
     ;; for field literals, look for matching `source-metadata`, and use that if we can find it; otherwise generate
     ;; basic info based on the content of the field literal
     [:field-literal field-name field-type]
-    (or (some #(when (= (:name %) field-name) %) source-metadata)
-        {:name         field-name
-         :base_type    field-type
-         :display_name (humanization/name->human-readable-name field-name)})
+    (assoc (or (some #(when (= (:name %) field-name) %) source-metadata)
+               {:name         field-name
+                :base_type    field-type
+                :display_name (humanization/name->human-readable-name field-name)})
+      :field_ref &match)
 
     [:expression expression-name]
-    (merge
-     ;; There's some inconsistency when expression names are keywords and when strings.
-     ;; TODO: remove this duality once https://github.com/metabase/mbql/issues/5 is resolved.
-     (infer-expression-type (some expressions ((juxt identity keyword) expression-name)))
-     {:name            expression-name
-      :display_name    expression-name
-      ;; provided so the FE can add easily add sorts and the like when someone clicks a column header
-      :expression_name expression-name})
+    (if-let [matching-expression (when (seq expressions)
+                                   (some expressions ((juxt keyword u/qualified-name) expression-name)))]
+      (merge
+       ;; There's some inconsistency when expression names are keywords and when strings.
+       ;; TODO: remove this duality once https://github.com/metabase/mbql/issues/5 is resolved.
+       (infer-expression-type matching-expression)
+       {:name            expression-name
+        :display_name    expression-name
+        ;; provided so the FE can add easily add sorts and the like when someone clicks a column header
+        :expression_name expression-name
+        :field_ref       &match})
+      (throw (ex-info (tru "No expression named {0} found. Found: {1}" expression-name (keys expressions))
+               {:type :invalid-query, :clause &match, :expressions expressions})))
 
     [:field-id id]
     (let [{parent-id :parent_id, :as field} (dissoc (qp.store/field id) :database_type)]
-      (if-not parent-id
-        field
-        (let [parent (col-info-for-field-clause inner-query [:field-id parent-id])]
-          (update field :name #(str (:name parent) \. %)))))
+      (assoc (if-not parent-id
+               field
+               (let [parent (col-info-for-field-clause inner-query [:field-id parent-id])]
+                 (update field :name #(str (:name parent) \. %))))
+        :field_ref &match))
 
     ;; we should never reach this if our patterns are written right so this is more to catch code mistakes than
     ;; something the user should expect to see
-    _ (throw (ex-info (str (tru "Don't know how to get information about Field:") " " &match)
+    _ (throw (ex-info (tru "Don't know how to get information about Field:" " " &match)
                {:field &match}))))
 
 
@@ -199,7 +222,7 @@
   These names are also used directly in queries, e.g. in the equivalent of a SQL `AS` clause."
   [ag-clause :- mbql.s/Aggregation & [{:keys [recursive-name-fn], :or {recursive-name-fn aggregation-name}}]]
   (when-not driver/*driver*
-    (throw (Exception. (str (tru "*driver* is unbound.")))))
+    (throw (Exception. (tru "*driver* is unbound."))))
   (mbql.u/match-one ag-clause
     [:aggregation-options _ (options :guard :name)]
     (:name options)
@@ -232,15 +255,15 @@
 
 (s/defn ^:private aggregation-arg-display-name :- su/NonBlankString
   "Name to use for an aggregation clause argument such as a Field when constructing the complete aggregation name."
-  [ag-arg :- Object]
+  [inner-query, ag-arg :- Object]
   (or (when (mbql.preds/Field? ag-arg)
-        (when-let [info (col-info-for-field-clause {} ag-arg)]
+        (when-let [info (col-info-for-field-clause inner-query ag-arg)]
           (some info [:display_name :name])))
-      (aggregation-display-name ag-arg)))
+      (aggregation-display-name inner-query ag-arg)))
 
 (s/defn aggregation-display-name :- su/NonBlankString
   "Return an appropriate user-facing display name for an aggregation clause."
-  [ag-clause]
+  [inner-query ag-clause]
   (mbql.u/match-one ag-clause
     [:aggregation-options _ (options :guard :display-name)]
     (:display-name options)
@@ -250,36 +273,35 @@
 
     [(operator :guard #{:+ :- :/ :*}) & args]
     (str/join (format " %s " (name operator))
-              (map (partial expression-arg-display-name aggregation-arg-display-name) args))
+              (for [arg args]
+                (expression-arg-display-name (partial aggregation-arg-display-name inner-query) arg)))
 
-    [:count]
-    (str (tru "count"))
-
-    [:distinct    arg]   (str (tru "distinct count of {0}"     (aggregation-arg-display-name arg)))
-    [:count       arg]   (str (tru "count of {0}"              (aggregation-arg-display-name arg)))
-    [:avg         arg]   (str (tru "average of {0}"            (aggregation-arg-display-name arg)))
+    [:count]             (tru "Count")
+    [:distinct    arg]   (tru "Distinct values of {0}"  (aggregation-arg-display-name inner-query arg))
+    [:count       arg]   (tru "Count of {0}"            (aggregation-arg-display-name inner-query arg))
+    [:avg         arg]   (tru "Average of {0}"          (aggregation-arg-display-name inner-query arg))
     ;; cum-count and cum-sum get names for count and sum, respectively (see explanation in `aggregation-name`)
-    [:cum-count   arg]   (str (tru "count of {0}"              (aggregation-arg-display-name arg)))
-    [:cum-sum     arg]   (str (tru "sum of {0}"                (aggregation-arg-display-name arg)))
-    [:stddev      arg]   (str (tru "standard deviation of {0}" (aggregation-arg-display-name arg)))
-    [:sum         arg]   (str (tru "sum of {0}"                (aggregation-arg-display-name arg)))
-    [:min         arg]   (str (tru "minimum value of {0}"      (aggregation-arg-display-name arg)))
-    [:max         arg]   (str (tru "maximum value of {0}"      (aggregation-arg-display-name arg)))
+    [:cum-count   arg]   (tru "Count of {0}"            (aggregation-arg-display-name inner-query arg))
+    [:cum-sum     arg]   (tru "Sum of {0}"              (aggregation-arg-display-name inner-query arg))
+    [:stddev      arg]   (tru "SD of {0}"               (aggregation-arg-display-name inner-query arg))
+    [:sum         arg]   (tru "Sum of {0}"              (aggregation-arg-display-name inner-query arg))
+    [:min         arg]   (tru "Min of {0}"              (aggregation-arg-display-name inner-query arg))
+    [:max         arg]   (tru "Max of {0}"              (aggregation-arg-display-name inner-query arg))
 
     ;; until we have a way to generate good names for filters we'll just have to say 'matching condition' for now
-    [:sum-where   arg _] (str (tru "sum of {0} matching condition" (aggregation-arg-display-name arg)))
-    [:share       _]     (str (tru "share of rows matching condition"))
-    [:count-where _]     (str (tru "count of rows matching condition"))
+    [:sum-where   arg _] (tru "Sum of {0} matching condition" (aggregation-arg-display-name inner-query arg))
+    [:share       _]     (tru "Share of rows matching condition")
+    [:count-where _]     (tru "Count of rows matching condition")
 
     (_ :guard mbql.preds/Field?)
-    (:display_name (col-info-for-field-clause nil ag-clause))
+    (:display_name (col-info-for-field-clause inner-query ag-clause))
 
     _
-    (aggregation-name ag-clause {:recursive-name-fn aggregation-arg-display-name})))
+    (aggregation-name ag-clause {:recursive-name-fn (partial aggregation-arg-display-name inner-query)})))
 
-(defn- ag->name-info [ag]
+(defn- ag->name-info [inner-query ag]
   {:name         (aggregation-name ag)
-   :display_name (aggregation-display-name ag)})
+   :display_name (aggregation-display-name inner-query ag)})
 
 (s/defn col-info-for-aggregation-clause
   "Return appropriate column metadata for an `:aggregation` clause."
@@ -291,7 +313,7 @@
     [:aggregation-options ag _]
     (merge
      (col-info-for-aggregation-clause inner-query ag)
-     (ag->name-info &match))
+     (ag->name-info inner-query &match))
 
     ;; Always treat count or distinct count as an integer even if the DB in question returns it as something
     ;; wacky like a BigDecimal or Float
@@ -300,20 +322,19 @@
      (col-info-for-aggregation-clause inner-query args)
      {:base_type    :type/Integer
       :special_type :type/Number}
-     (ag->name-info &match))
+     (ag->name-info inner-query &match))
 
-    ; TODO - should we be doing this for `:sum-where` as well?
     [:count-where _]
     (merge
      {:base_type    :type/Integer
       :special_type :type/Number}
-     (ag->name-info &match))
+     (ag->name-info inner-query &match))
 
     [:share _]
     (merge
      {:base_type    :type/Float
       :special_type :type/Number}
-     (ag->name-info &match))
+     (ag->name-info inner-query &match))
 
     ;; get info from a Field if we can (theses Fields are matched when ag clauses recursively call
     ;; `col-info-for-ag-clause`, and this info is added into the results)
@@ -328,13 +349,13 @@
     (merge
      (infer-expression-type &match)
      (when (mbql.preds/Aggregation? &match)
-       (ag->name-info &match)))
+       (ag->name-info inner-query &match)))
 
     ;; get name/display-name of this ag
     [(_ :guard keyword?) arg & _]
     (merge
      (col-info-for-aggregation-clause inner-query arg)
-     (ag->name-info &match))))
+     (ag->name-info inner-query &match))))
 
 
 ;;; ----------------------------------------- Putting it all together (MBQL) -----------------------------------------
@@ -346,28 +367,26 @@
       (when-not (= expected-count actual-count)
         (throw
          (Exception.
-          (str (tru "Query processor error: mismatched number of columns in query and results.")
+          (str (deferred-tru "Query processor error: mismatched number of columns in query and results.")
                " "
-               (tru "Expected {0} fields, got {1}" expected-count actual-count)
+               (deferred-tru "Expected {0} fields, got {1}" expected-count actual-count)
                "\n"
-               (tru "Expected: {0}" (mapv :name returned-mbql-columns))
+               (deferred-tru "Expected: {0}" (mapv :name returned-mbql-columns))
                "\n"
-               (tru "Actual: {0}" (vec (:columns results))))))))))
+               (deferred-tru "Actual: {0}" (vec (:columns results))))))))))
 
 (s/defn ^:private cols-for-fields
   [{:keys [fields], :as inner-query} :- su/Map]
   (for [field fields]
     (assoc (col-info-for-field-clause inner-query field)
-      :source    :fields
-      :field_ref field)))
+      :source :fields)))
 
 (s/defn ^:private cols-for-ags-and-breakouts
   [{aggregations :aggregation, breakouts :breakout, :as inner-query} :- su/Map]
   (concat
    (for [breakout breakouts]
      (assoc (col-info-for-field-clause inner-query breakout)
-       :source    :breakout
-       :field_ref breakout))
+       :source :breakout))
    (for [[i aggregation] (m/indexed aggregations)]
      (assoc (col-info-for-aggregation-clause inner-query aggregation)
        :source    :aggregation
@@ -485,7 +504,7 @@
                  (nil? columns)))
     (let [sorted-columns (expected-column-sort-order query results)]
       (assoc results
-        :columns (map u/keyword->qualified-name sorted-columns)
+        :columns (map u/qualified-name sorted-columns)
         :rows    (for [row rows]
                    (for [col sorted-columns]
                      (get row col)))))))
